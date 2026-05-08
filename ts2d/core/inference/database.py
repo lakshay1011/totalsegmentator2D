@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import zipfile
+import urllib.request
 from glob import glob
 from typing import Optional
 import gdown
@@ -210,11 +211,43 @@ class URLDataBase(DataBase):
             # download the zip to a temporary folder and extract to the destination
             with SafeTemporaryDirectory() as temp:
                 temp_zip = os.path.join(temp, f'{subkey}.zip')
-                gdown.download(url, output=temp_zip, quiet=False, fuzzy=True)
+                self._download_zip(url=url, output=temp_zip)
                 if not os.path.exists(temp_zip):
                     raise RuntimeError("Download failed for url: {}".format(url))
+                if not zipfile.is_zipfile(temp_zip):
+                    raise RuntimeError(
+                        "Downloaded file is not a ZIP archive for url: {}. "
+                        "This usually means the remote returned an HTML/error page instead of the model archive.".format(url)
+                    )
                 with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
                     zip_ref.extractall(dest_root)
+
+    def _download_zip(self, url: str, output: str):
+        """
+        Prefer a standard HTTP download for direct URLs (e.g. Zenodo) and
+        only fall back to gdown for providers that require it.
+        """
+        last_error = None
+
+        # Try direct HTTP download first.
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp, open(output, 'wb') as fh:
+                shutil.copyfileobj(resp, fh)
+            if os.path.exists(output) and os.path.getsize(output) > 0:
+                return
+        except Exception as ex:
+            last_error = ex
+
+        # Fallback to gdown for URLs that need provider-specific handling.
+        try:
+            gdown.download(url, output=output, quiet=False, fuzzy=True)
+            if os.path.exists(output) and os.path.getsize(output) > 0:
+                return
+        except Exception as ex:
+            last_error = ex
+
+        raise RuntimeError("Download failed for url: {} ({})".format(url, last_error))
 
     def _enumerate(self):
         for model, mval in self._urls.items():
