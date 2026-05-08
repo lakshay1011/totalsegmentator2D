@@ -4,9 +4,9 @@ import json
 import shutil
 import tempfile
 import zipfile
-import urllib.request
 from glob import glob
 from typing import Optional
+import requests
 import gdown
 
 from ts2d.core.util.log import warn, log
@@ -224,30 +224,37 @@ class URLDataBase(DataBase):
 
     def _download_zip(self, url: str, output: str):
         """
-        Prefer a standard HTTP download for direct URLs (e.g. Zenodo) and
-        only fall back to gdown for providers that require it.
+        Download model archive from URL.
+        Use requests for regular HTTP sources (e.g. Zenodo) and gdown only
+        for Google Drive URLs.
         """
-        last_error = None
+        if "drive.google.com" in str(url).lower():
+            try:
+                gdown.download(url, output=output, quiet=False, fuzzy=True)
+                if os.path.exists(output) and os.path.getsize(output) > 0:
+                    return
+                raise RuntimeError("Download produced an empty file")
+            except Exception as ex:
+                raise RuntimeError("Download failed for url: {} ({})".format(url, ex))
 
-        # Try direct HTTP download first.
+        # Direct HTTP download for standard providers like Zenodo.
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as resp, open(output, 'wb') as fh:
-                shutil.copyfileobj(resp, fh)
-            if os.path.exists(output) and os.path.getsize(output) > 0:
-                return
+            with requests.get(
+                url,
+                stream=True,
+                allow_redirects=True,
+                timeout=(30, 300),
+                headers={"User-Agent": "Mozilla/5.0"},
+            ) as resp:
+                resp.raise_for_status()
+                with open(output, 'wb') as fh:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            fh.write(chunk)
+            if not os.path.exists(output) or os.path.getsize(output) <= 0:
+                raise RuntimeError("Download produced an empty file")
         except Exception as ex:
-            last_error = ex
-
-        # Fallback to gdown for URLs that need provider-specific handling.
-        try:
-            gdown.download(url, output=output, quiet=False, fuzzy=True)
-            if os.path.exists(output) and os.path.getsize(output) > 0:
-                return
-        except Exception as ex:
-            last_error = ex
-
-        raise RuntimeError("Download failed for url: {} ({})".format(url, last_error))
+            raise RuntimeError("Download failed for url: {} ({})".format(url, ex))
 
     def _enumerate(self):
         for model, mval in self._urls.items():
