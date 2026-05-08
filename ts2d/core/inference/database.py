@@ -4,6 +4,8 @@ import json
 import shutil
 import tempfile
 import zipfile
+import time
+import urllib.request
 from glob import glob
 from typing import Optional
 import requests
@@ -224,37 +226,72 @@ class URLDataBase(DataBase):
 
     def _download_zip(self, url: str, output: str):
         """
-        Download model archive from URL.
-        Use requests for regular HTTP sources (e.g. Zenodo) and gdown only
-        for Google Drive URLs.
+        Download a ZIP model archive from URL.
+        Retries are applied for transient failures (e.g. intermittent Zenodo 403).
         """
-        if "drive.google.com" in str(url).lower():
-            try:
-                gdown.download(url, output=output, quiet=False, fuzzy=True)
-                if os.path.exists(output) and os.path.getsize(output) > 0:
-                    return
-                raise RuntimeError("Download produced an empty file")
-            except Exception as ex:
-                raise RuntimeError("Download failed for url: {} ({})".format(url, ex))
+        def _reset_output():
+            if os.path.exists(output):
+                removeall(output)
 
-        # Direct HTTP download for standard providers like Zenodo.
+        def _is_valid_zip():
+            return os.path.exists(output) and os.path.getsize(output) > 0 and zipfile.is_zipfile(output)
+
+        errors = []
+        url = str(url)
+
+        # For direct HTTP providers like Zenodo, use requests first with retries.
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*",
+            "Referer": "https://zenodo.org/",
+        }
+        for i in range(3):
+            _reset_output()
+            try:
+                with requests.get(
+                    url,
+                    stream=True,
+                    allow_redirects=True,
+                    timeout=(30, 300),
+                    headers=headers,
+                ) as resp:
+                    resp.raise_for_status()
+                    with open(output, 'wb') as fh:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                fh.write(chunk)
+                if _is_valid_zip():
+                    return
+                errors.append("requests attempt {}: downloaded file is not a valid ZIP".format(i + 1))
+            except Exception as ex:
+                errors.append("requests attempt {}: {}".format(i + 1, ex))
+            time.sleep(2 ** i)
+
+        # Fallback to urllib for environments where requests gets blocked.
+        _reset_output()
         try:
-            with requests.get(
-                url,
-                stream=True,
-                allow_redirects=True,
-                timeout=(30, 300),
-                headers={"User-Agent": "Mozilla/5.0"},
-            ) as resp:
-                resp.raise_for_status()
-                with open(output, 'wb') as fh:
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            fh.write(chunk)
-            if not os.path.exists(output) or os.path.getsize(output) <= 0:
-                raise RuntimeError("Download produced an empty file")
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp, open(output, 'wb') as fh:
+                shutil.copyfileobj(resp, fh)
+            if _is_valid_zip():
+                return
+            errors.append("urllib: downloaded file is not a valid ZIP")
         except Exception as ex:
-            raise RuntimeError("Download failed for url: {} ({})".format(url, ex))
+            errors.append("urllib: {}".format(ex))
+
+        # Final fallback: gdown (required for Google Drive; can help in some constrained setups).
+        _reset_output()
+        try:
+            gdown.download(url, output=output, quiet=False, fuzzy=True)
+            if _is_valid_zip():
+                return
+            errors.append("gdown: downloaded file is not a valid ZIP")
+        except Exception as ex:
+            errors.append("gdown: {}".format(ex))
+
+        raise RuntimeError(
+            "Download failed for url: {}. All strategies failed. {}".format(url, " | ".join(errors))
+        )
 
     def _enumerate(self):
         for model, mval in self._urls.items():
