@@ -232,23 +232,35 @@ class URLDataBase(DataBase):
         def _reset_output():
             if os.path.exists(output):
                 removeall(output)
-
+    
         def _is_valid_zip():
             return os.path.exists(output) and os.path.getsize(output) > 0 and zipfile.is_zipfile(output)
-
+    
         errors = []
         url = str(url)
-
-        # For direct HTTP providers like Zenodo, use requests first with retries.
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*",
-            "Referer": "https://zenodo.org/",
-        }
-        for i in range(3):
+    
+        # Try multiple User-Agent strings
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        ]
+    
+        for i, ua in enumerate(user_agents):
             _reset_output()
+            headers = {
+                "User-Agent": ua,
+                "Accept": "application/octet-stream,*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://zenodo.org/",
+                "Connection": "keep-alive",
+            }
             try:
-                with requests.get(
+                # First make a HEAD request to get cookies
+                session = requests.Session()
+                session.get("https://zenodo.org/", headers=headers, timeout=10)
+                
+                with session.get(
                     url,
                     stream=True,
                     allow_redirects=True,
@@ -266,10 +278,15 @@ class URLDataBase(DataBase):
             except Exception as ex:
                 errors.append("requests attempt {}: {}".format(i + 1, ex))
             time.sleep(2 ** i)
-
-        # Fallback to urllib for environments where requests gets blocked.
+    
+        # Fallback to urllib
         _reset_output()
         try:
+            headers = {
+                "User-Agent": user_agents[0],
+                "Accept": "*/*",
+                "Referer": "https://zenodo.org/",
+            }
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=300) as resp, open(output, 'wb') as fh:
                 shutil.copyfileobj(resp, fh)
@@ -278,8 +295,8 @@ class URLDataBase(DataBase):
             errors.append("urllib: downloaded file is not a valid ZIP")
         except Exception as ex:
             errors.append("urllib: {}".format(ex))
-
-        # Final fallback: gdown (required for Google Drive; can help in some constrained setups).
+    
+        # Final fallback: gdown
         _reset_output()
         try:
             gdown.download(url, output=output, quiet=False, fuzzy=True)
@@ -288,7 +305,7 @@ class URLDataBase(DataBase):
             errors.append("gdown: downloaded file is not a valid ZIP")
         except Exception as ex:
             errors.append("gdown: {}".format(ex))
-
+    
         raise RuntimeError(
             "Download failed for url: {}. All strategies failed. {}".format(url, " | ".join(errors))
         )
